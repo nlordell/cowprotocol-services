@@ -68,13 +68,27 @@ contract Solver {
                     sellAmount,
                     nativeToken
                 );
+
+            uint256 traderSellBalance = IERC20(sellToken).balanceOf(trader);
+            if (traderSellBalance < sellAmount) {
+                // The solver potentially has access to some additional funds
+                // that were mocked using state overrides. Attemp to transfer
+                // them to the trader so they have sufficient balance for the
+                // settlement.
+                if (!IERC20(sellToken).trySafeTransfer(trader, sellAmount)) {
+                    revert("trader does not have enough sell_token");
+                }
+            }
         }
 
         // Warm the storage for sending ETH to smart contract addresses.
         // We allow this call to revert becaues it was either unnecessary in the first place
         // or failing to send `ETH` to the `receiver` will cause a revert in the settlement
         // contract.
-        receiver.call{value: 0}("");
+        {
+            (bool success,) = receiver.call{value: 0}("");
+            success;
+        }
 
         // Store pre-settlement balances
         _storeSettlementBalances(tokens, settlementContract);

@@ -37,6 +37,12 @@ async fn local_node_verified_quote_for_settlement_contract() {
     run_test(verified_quote_for_settlement_contract).await;
 }
 
+#[tokio::test]
+#[ignore]
+async fn local_node_verified_quote_with_simulated_balance() {
+    run_test(verified_quote_with_simulated_balance).await;
+}
+
 /// The block number from which we will fetch state for the forked tests.
 const FORK_BLOCK_MAINNET: u64 = 19796077;
 
@@ -203,6 +209,53 @@ async fn verified_quote_for_settlement_contract(web3: Web3) {
             from: trader.address(),
             receiver: Some(onchain.contracts().gp_settlement.address()),
             ..request.clone()
+        })
+        .await
+        .unwrap();
+    assert!(response.verified);
+}
+
+/// Test that asserts that we can verify quotes for traders with simulated
+/// balances.
+async fn verified_quote_with_simulated_balance(web3: Web3) {
+    tracing::info!("Setting up chain state.");
+    let mut onchain = OnchainComponents::deploy(web3).await;
+
+    let [solver] = onchain.make_solvers(to_wei(10)).await;
+    let [trader] = onchain.make_accounts(to_wei(0)).await;
+    let [token] = onchain
+        .deploy_tokens_with_weth_uni_v2_pools(to_wei(1_000), to_wei(1_000))
+        .await;
+
+    tracing::info!("Starting services.");
+    let services = Services::new(&onchain).await;
+    services
+        .start_protocol_with_args(
+            ExtraServiceArgs {
+                api: vec![format!(
+                    // The OpenZeppelin `ERC20Mintable` token uses a mapping in
+                    // the first (0'th) storage slot for balances.
+                    "--quote-token-balance-overrides={:?}@0",
+                    token.address()
+                )],
+                ..Default::default()
+            },
+            solver.clone(),
+        )
+        .await;
+
+    // quote where the trader has no balances or approval set.
+    let response = services
+        .submit_quote(&OrderQuoteRequest {
+            from: trader.address(),
+            sell_token: token.address(),
+            buy_token: onchain.contracts().weth.address(),
+            side: OrderQuoteSide::Sell {
+                sell_amount: SellAmount::BeforeFee {
+                    value: to_wei(1).try_into().unwrap(),
+                },
+            },
+            ..Default::default()
         })
         .await
         .unwrap();

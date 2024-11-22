@@ -1,6 +1,11 @@
 pub mod balance_overrides;
 
 use {
+    self::balance_overrides::{
+        BalanceOverrideRequest,
+        BalanceOverriding,
+        ConfigurationBalanceOverrides,
+    },
     super::{Estimate, Verification},
     crate::{
         code_fetching::CodeFetching,
@@ -58,6 +63,7 @@ pub struct TradeVerifier {
     web3: Web3,
     simulator: Arc<dyn CodeSimulating>,
     code_fetcher: Arc<dyn CodeFetching>,
+    balance_overrides: Arc<dyn BalanceOverriding>,
     block_stream: CurrentBlockWatcher,
     settlement: GPv2Settlement,
     native_token: H160,
@@ -84,6 +90,7 @@ impl TradeVerifier {
         Ok(Self {
             simulator,
             code_fetcher,
+            balance_overrides: Arc::new(ConfigurationBalanceOverrides::default()),
             block_stream,
             settlement: settlement_contract,
             native_token,
@@ -91,6 +98,11 @@ impl TradeVerifier {
             web3,
             domain_separator,
         })
+    }
+
+    pub fn with_balance_overrides(mut self, balance_overrides: Arc<dyn BalanceOverriding>) -> Self {
+        self.balance_overrides = balance_overrides;
+        self
     }
 
     async fn verify_inner(
@@ -185,7 +197,7 @@ impl TradeVerifier {
         };
 
         let overrides = self
-            .prepare_state_overrides(verification, trade)
+            .prepare_state_overrides(verification, query, trade)
             .await
             .map_err(Error::SimulationFailed)?;
 
@@ -281,6 +293,7 @@ impl TradeVerifier {
     async fn prepare_state_overrides(
         &self,
         verification: &Verification,
+        query: &PriceQuery,
         trade: &TradeKind,
     ) -> Result<HashMap<H160, StateOverride>> {
         // Set up mocked trader.
@@ -313,6 +326,34 @@ impl TradeVerifier {
             code: Some(deployed_bytecode!(Solver)),
             ..Default::default()
         };
+
+        // Provide mocked balances if possible to the solver to allow it to
+        // give some balances to the trader in order to verify trades even for
+        // owners without balances. Note that we explicitly override the
+        // **solver's** balance and not the trader's directly. This allows the
+        // simulation to conditionally transfer the balance only when it is
+        // safe to mock the trade pre-conditions on behalf of the user. We use
+        // a similar strategy for determining whether or not to set approvals on
+        // behalf of the trader.
+        if let Some(solver_balance_override) =
+            self.balance_overrides
+                .state_override(&BalanceOverrideRequest {
+                    token: query.sell_token,
+                    holder: trade.solver(),
+                    amount: match query.kind {
+                        OrderKind::Sell => query.in_amount.get(),
+                        OrderKind::Buy => trade.out_amount(
+                            &query.buy_token,
+                            &query.sell_token,
+                            &query.in_amount.get(),
+                            &query.kind,
+                        )?,
+                    },
+                })
+        {
+            tracing::debug!(?solver_balance_override, "solver balance override enabled");
+            overrides.insert(query.sell_token, solver_balance_override);
+        }
 
         // If the trade requires a special tx.origin we also need to fake the
         // authenticator and tx origin balance.
