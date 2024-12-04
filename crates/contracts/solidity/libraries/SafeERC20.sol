@@ -9,8 +9,9 @@ library SafeERC20 {
 
     function trySafeTransfer(IERC20 self, address target, uint256 amount) internal returns (bool success) {
         bytes memory cdata = abi.encodeCall(self.transfer, (target, amount));
-        bytes memory rdata = address(self).doCall(cdata);
-        return check(rdata);
+        bytes memory rdata;
+        (success, rdata) = address(self).call(cdata);
+        return success && check(rdata);
     }
 
     function safeApprove(IERC20 self, address target, uint256 amount) internal {
